@@ -7,6 +7,7 @@
 #include <fcntl.h>
 
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -18,8 +19,7 @@
 /* Resultado de los journalctl */
 #define FILE_NAME "build/results.txt"
 
-static volatile int glob = 0;  /* "volatile" prevents compiler optimizations of arithmetic operations on 'glob' */
-static int fd_pipe[2],fd_pipe1[2],fd_pipe2[2],fd_file;
+static int fd_pipe[2],fd_pipe1[2],fd_pipe2[2];
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* monlog -s servicio1,servicio2 -t 1 */
@@ -72,14 +72,9 @@ void * exec_journalctl(void *arg){
 	printf("Service_i %s\n", si);
 	fflush(stdout);
 	
-	int loc;
 	int status, pid_current;
 	
 	pthread_mutex_lock(&mutex); //START Critical section
-        
-        loc = glob;
-        loc++;
-        glob = loc;
          
         if (pipe(fd_pipe) == -1){ 
 		  perror("ERROR>> En el pipe");
@@ -91,7 +86,6 @@ void * exec_journalctl(void *arg){
         	case -1: perror("ERROR>> En el fork1");
         	break;
         	case 0:
-        		printf("En el hijo 1 %s\n",si);
 			close(fd_pipe[READ_EXT]);
 			dup2(fd_pipe[WRITE_EXT], STDOUT_FILENO);
 			close(fd_pipe[WRITE_EXT]);
@@ -99,6 +93,7 @@ void * exec_journalctl(void *arg){
 			//execlp("/bin/ls", "ls", "-l", NULL);	
 			char *argv[6];
 			argv[0]="journalctl";
+			
 			argv[1]="--no-pager";
 			argv[2]="-o";
 			argv[3]="json-pretty";
@@ -108,7 +103,6 @@ void * exec_journalctl(void *arg){
 			execvp(argv[0],argv);        		
         	break;
         	default:
-        		printf("En el padre %s\n",si);
         		close(fd_pipe[WRITE_EXT]);
         		
         		pipe(fd_pipe1);
@@ -129,28 +123,47 @@ void * exec_journalctl(void *arg){
 				
         		}else{
         		        /* En el padre*/
-        		        close(fd_pipe[READ_EXT]);
         		        close(fd_pipe1[WRITE_EXT]);
+        		        
+        		        pipe(fd_pipe2);
+        		        
+        		        pid_current = fork();
+        		        if(pid_current == 0){
+        		        /* En el hijo 3*/
+        		        close(fd_pipe2[READ_EXT]);
+        		        
+        		        dup2(fd_pipe1[READ_EXT], STDIN_FILENO);
+        		        close(fd_pipe1[READ_EXT]);
+        		        
+        		        dup2(fd_pipe2[WRITE_EXT], STDOUT_FILENO);
+        		        close(fd_pipe2[WRITE_EXT]);
+        		        
+        		        execlp("/usr/bin/sed","sed","s/,//",NULL);
+        		        }else{
+        		        /* En el padre*/
+        		        close(fd_pipe1[READ_EXT]);
+        		        close(fd_pipe2[WRITE_EXT]);
         		        
         		        pid_current = fork();
         		        
         		        if(pid_current == 0){
-        		        /* En el hijo 3*/
-        		        dup2(fd_pipe1[READ_EXT], STDIN_FILENO);
-        		        close(fd_pipe1[READ_EXT]);
+        		        /* En el hijo 4*/
+        		        dup2(fd_pipe2[READ_EXT], STDIN_FILENO);
+        		        close(fd_pipe2[READ_EXT]);
         		        
-        		        execlp("/usr/bin/sed","sed","s/,//",NULL);
+        		        execlp("/usr/bin/uniq","uniq","-c",NULL);
         		        }
+        		}
         		}
         		
         }
         
-        close(fd_pipe1[READ_EXT]);
+        close(fd_pipe2[READ_EXT]);
         
         wait(&status);
         wait(&status);
         wait(&status);
-        
+        wait(&status);
         
         pthread_mutex_unlock(&mutex); //END Critical section
         
@@ -174,7 +187,6 @@ int main(int argc, char **argv){
 	while((c = getopt(argc, argv, "s:ht:"))!=-1){
 		switch(c){
 			case 's':
-				printf("S\n");
 				services_par=optarg;
 				break;
 			case 't':
@@ -237,7 +249,6 @@ int main(int argc, char **argv){
 		pthread_join(hilos[j], NULL);
 	}
 	
-	printf("glob = %d\n", glob);
 	printf(">> FIN\n");
 	
 	return 0;
